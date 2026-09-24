@@ -3,6 +3,8 @@ pipeline {
 
     environment {
         SCANNER_HOME = tool 'SonarScanner'
+        FLOCI_ENDPOINT = 'http://localhost:4566'
+        S3_BUCKET = 'smart-task-frontend'
     }
 
     stages {
@@ -76,6 +78,24 @@ pipeline {
                     curl -f http://localhost:8082
 
                     docker rm -f smart-task-frontend-jenkins
+                '''
+            }
+        }
+
+        stage('Deploy Frontend to Floci S3') {
+            steps {
+                sh '''
+                    echo "Deploying frontend to Floci S3..."
+
+                    aws --endpoint-url=${FLOCI_ENDPOINT} \
+                        s3 sync frontend/dist \
+                        s3://${S3_BUCKET} \
+                        --delete
+
+                    echo "S3 deployment completed."
+
+                    aws --endpoint-url=${FLOCI_ENDPOINT} \
+                        s3 ls s3://${S3_BUCKET}/
                 '''
             }
         }
