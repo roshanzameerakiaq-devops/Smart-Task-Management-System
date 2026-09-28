@@ -1,0 +1,154 @@
+pipeline {
+
+    agent any
+
+    environment {
+        SONAR_PROJECT_KEY = 'smart-task-backend'
+        SONAR_PROJECT_NAME = 'Smart Task Backend'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo 'Checking out backend project'
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            parallel {
+
+                stage('Auth Service') {
+                    steps {
+                        dir('auth-service_1784011000189') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+
+                stage('Task Service') {
+                    steps {
+                        dir('task-service') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+
+                stage('Notification Service') {
+                    steps {
+                        dir('notification-service') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+
+                stage('Report Service') {
+                    steps {
+                        dir('report-service') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+
+                stage('API Gateway') {
+                    steps {
+                        dir('api-gateway_1784010924579') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.projectName='${SONAR_PROJECT_NAME}' \
+                              -Dsonar.sources=api-gateway_1784010924579,auth-service_1784011000189,task-service,notification-service,report-service \
+                              -Dsonar.exclusions='**/node_modules/**,**/dist/**,**/build/**'
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Backend Docker Images') {
+            steps {
+                sh '''
+                    docker compose build \
+                      auth-service \
+                      task-service \
+                      notification-service \
+                      report-service \
+                      api-gateway
+                '''
+            }
+        }
+
+        stage('Deploy Backend with Docker Compose') {
+            steps {
+                sh '''
+                    docker compose stop \
+                      auth-service \
+                      task-service \
+                      notification-service \
+                      report-service \
+                      api-gateway || true
+
+                    docker compose up -d --build \
+                      mongodb \
+                      auth-service \
+                      task-service \
+                      notification-service \
+                      report-service \
+                      api-gateway
+                '''
+            }
+        }
+
+        stage('Verify Backend') {
+            steps {
+                sh '''
+                    sleep 10
+
+                    echo "API Gateway health:"
+                    curl -f http://localhost:5000/health
+
+                    echo
+                    echo "Backend containers:"
+                    docker compose ps
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo 'BACKEND CI/CD PIPELINE EXECUTED SUCCESSFULLY'
+        }
+
+        failure {
+            echo 'BACKEND CI/CD PIPELINE FAILED'
+        }
+
+        always {
+            sh 'docker compose ps || true'
+        }
+    }
+}
