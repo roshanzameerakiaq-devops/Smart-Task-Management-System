@@ -3,78 +3,76 @@ pipeline {
 
     environment {
         SCANNER_HOME = tool 'SonarScanner'
-        FLOCI_ENDPOINT = 'http://localhost:4566'
-        S3_BUCKET = 'smart-task-frontend'
+        HARBOR_REGISTRY = '43.205.113.13'
+        HARBOR_PROJECT = 'smart-task'
+        SONAR_PROJECT_KEY = 'smart-task-management-system'
+        K8S_DEPLOY_ENABLED = 'false'
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                echo 'Checking out Smart Task Management System'
-            }
-        }
-
-        stage('Install Frontend Dependencies') {
-            steps {
-                sh '''
-                    cd frontend
-                    npm install
-                '''
+                checkout scm
             }
         }
 
         stage('SonarQube Scan') {
             steps {
-                dir('frontend') {
-                    withSonarQubeEnv('SonarQube') {
-                        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                            sh '''
-                                ${SCANNER_HOME}/bin/sonar-scanner \
-                                -Dsonar.projectKey=smart-task-frontend \
-                                -Dsonar.projectName="Smart Task Frontend" \
-                                -Dsonar.sources=src \
-                                -Dsonar.exclusions="**/node_modules/**,**/dist/**" \
-                                -Dsonar.sourceEncoding=UTF-8 \
-                                -Dsonar.login="$SONAR_TOKEN"
-                            '''
-                        }
+                withSonarQubeEnv('SonarQube') {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            "${SCANNER_HOME}/bin/sonar-scanner" \
+                              -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                              -Dsonar.projectName="Smart Task Management System" \
+                              -Dsonar.sources="frontend/src,api-gateway_1784010924579/src,auth-service_1784011000189/src,task-service/src,notification-service/src,report-service/src" \
+                              -Dsonar.exclusions="**/node_modules/**,**/dist/**" \
+                              -Dsonar.sourceEncoding=UTF-8 \
+                              -Dsonar.token="$SONAR_TOKEN"
+                        '''
                     }
                 }
             }
         }
 
-        stage('Build Frontend') {
+        stage('Build Docker Images') {
             steps {
                 sh '''
-                    cd frontend
-                    npm run build
+                    set -e
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/frontend:${BUILD_NUMBER} \
+                        frontend
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/api-gateway:${BUILD_NUMBER} \
+                        api-gateway_1784010924579
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/auth-service:${BUILD_NUMBER} \
+                        auth-service_1784011000189
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/task-service:${BUILD_NUMBER} \
+                        task-service
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/notification-service:${BUILD_NUMBER} \
+                        notification-service
+
+                    docker build -t ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/report-service:${BUILD_NUMBER} \
+                        report-service
                 '''
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Test Frontend Image') {
             steps {
                 sh '''
-                    cd frontend
-                    docker build -t smart-task-frontend:${BUILD_NUMBER} .
-                    docker tag smart-task-frontend:${BUILD_NUMBER} smart-task-frontend:latest
-                '''
-            }
-        }
-
-        stage('Test Docker Image') {
-            steps {
-                sh '''
+                    set -e
                     docker rm -f smart-task-frontend-jenkins 2>/dev/null || true
 
                     docker run -d \
                         --name smart-task-frontend-jenkins \
                         -p 8082:80 \
-                        smart-task-frontend:${BUILD_NUMBER}
+                        ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/frontend:${BUILD_NUMBER}
 
                     sleep 5
-
                     curl -f http://localhost:8082
 
                     docker rm -f smart-task-frontend-jenkins
@@ -82,20 +80,71 @@ pipeline {
             }
         }
 
-        stage('Deploy Frontend to Floci S3') {
+        stage('Push Images to Harbor') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'harbor-credentials',
+                    usernameVariable: 'HARBOR_USER',
+                    passwordVariable: 'HARBOR_PASSWORD'
+                )]) {
+                    sh '''
+                        set -e
+
+                        echo "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" \
+                            --username "$HARBOR_USER" \
+                            --password-stdin
+
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/frontend:${BUILD_NUMBER}
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/api-gateway:${BUILD_NUMBER}
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/auth-service:${BUILD_NUMBER}
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/task-service:${BUILD_NUMBER}
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/notification-service:${BUILD_NUMBER}
+                        docker push ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/report-service:${BUILD_NUMBER}
+
+                        docker logout "$HARBOR_REGISTRY"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            when {
+                expression {
+                    return env.K8S_DEPLOY_ENABLED == 'true'
+                }
+            }
             steps {
                 sh '''
-                    echo "Deploying frontend to Floci S3..."
+                    set -e
 
-                    aws --endpoint-url=${FLOCI_ENDPOINT} \
-                        s3 sync frontend/dist \
-                        s3://${S3_BUCKET} \
-                        --delete
+                    kubectl create namespace smart-task \
+                        --dry-run=client -o yaml | kubectl apply -f -
 
-                    echo "S3 deployment completed."
+                    kubectl apply -f kubernetes/mongodb.yaml
 
-                    aws --endpoint-url=${FLOCI_ENDPOINT} \
-                        s3 ls s3://${S3_BUCKET}/
+                    helm upgrade --install api-gateway helm/api-gateway \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
+
+                    helm upgrade --install auth-service helm/auth-service \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
+
+                    helm upgrade --install task-service helm/task-service \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
+
+                    helm upgrade --install notification-service helm/notification-service \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
+
+                    helm upgrade --install report-service helm/report-service \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
+
+                    helm upgrade --install frontend helm/frontend \
+                        --namespace smart-task \
+                        --set image.tag=${BUILD_NUMBER}
                 '''
             }
         }
@@ -103,16 +152,16 @@ pipeline {
 
     post {
         always {
+            sh 'docker image prune -f || true'
             cleanWs()
-            echo 'Pipeline Finished'
         }
 
         success {
-            echo 'CI/CD Pipeline Executed Successfully'
+            echo 'Smart Task CI/CD pipeline completed successfully.'
         }
 
         failure {
-            echo 'CI/CD Pipeline Failed'
+            echo 'Smart Task CI/CD pipeline failed.'
         }
     }
 }

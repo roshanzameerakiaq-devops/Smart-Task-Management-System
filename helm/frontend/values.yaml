@@ -2,7 +2,7 @@
 replicaCount: 1
 
 image:
-  repository: 13.48.106.244/smart-task-management-system/frontend
+  repository: 43.205.113.13/smart-task/frontend
   tag: "36"
   pullPolicy: Always
 

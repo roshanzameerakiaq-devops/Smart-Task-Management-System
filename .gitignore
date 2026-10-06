@@ -25,3 +25,8 @@ Thumbs.db
 .idea/
 # SonarQube
 **/.scannerwork/
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*

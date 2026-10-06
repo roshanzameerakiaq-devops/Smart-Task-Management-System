@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 13.48.106.244/smart-task-management-system/task-service
+  repository: 43.205.113.13/smart-task/task-service
   tag: "23"
   pullPolicy: Always
 
@@ -18,8 +18,6 @@ resources: {}
 
 env:
   PORT: "5002"
-  JWT_SECRET: "mysecretkey"
-  MONGO_URI: "mongodb://mongodb:27017/taskdb"
 
 ingress:
   enabled: true
